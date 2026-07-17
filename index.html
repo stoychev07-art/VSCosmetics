@@ -191,6 +191,10 @@
   <aside class="panel no-print" id="panel">
     <div class="ph"><b>Клиенти</b><button class="pclose" onclick="closePanel()">×</button></div>
     <div class="psearch"><input type="text" id="psearch" placeholder="Търсене по име…" oninput="renderList()"></div>
+    <div style="padding:8px 12px;border-bottom:1px solid var(--line)">
+      <button class="btn ghost" style="width:100%" onclick="document.getElementById('listfile').click()">⭱ Импорт на списък (Studio24 / CSV)</button>
+      <input id="listfile" type="file" accept=".json,.csv,text/csv,application/json" style="display:none" onchange="importList(event)">
+    </div>
     <div class="plist" id="plist"></div>
     <div class="pfoot">Записва се на това устройство. За архив/споделяне ползвайте „Файл".</div>
   </aside>
@@ -198,8 +202,11 @@
   <!-- ЛИЧНИ ДАННИ -->
   <div class="card" style="--accent:var(--rose-deep)">
     <h2>Лични данни</h2>
-    <div class="grid g4">
+    <div class="grid" style="grid-template-columns:1fr">
       <div><label class="cap">Име и фамилия</label><input type="text" data-field data-key="ime2"></div>
+    </div>
+    <div class="grid g4" style="margin-top:10px">
+      <div><label class="cap">Имейл</label><input type="text" data-field data-key="email"></div>
       <div><label class="cap">Телефон</label><input type="text" data-field data-key="tel"></div>
       <div><label class="cap">Дата</label><input type="date" data-field data-key="data"></div>
       <div><label class="cap">Възраст</label><input type="text" data-field data-key="vazrast"></div>
@@ -361,6 +368,7 @@
     document.querySelectorAll('[data-field]').forEach(function(el){
       if(el.type==="checkbox") el.checked=false;
       else if(el.getAttribute("data-radio")) el.checked=false;
+      else el.value="";
     });
     var f=data.fields||{};
     Object.keys(f).forEach(function(k){
@@ -449,6 +457,66 @@
 
   // override newClient to also reset currentId + draft
   window.newClient=function(){ if(!confirm("Да изчистя картона за нова клиентка? Незаписаните данни ще се загубят.")) return; currentId=null; apply({fields:{},hist:[{},{},{},{},{},{}],canvas:{}}); LS.set("vs_draft",null); };
+
+  // ===== bulk import of clients (Studio24 JSON export or CSV) =====
+  function keyOf(n,p){ return (n||"").trim().toLowerCase()+"|"+(p||"").replace(/\D/g,""); }
+  function uid2(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,8); }
+  function normalizeRec(item){
+    if(!item) return null;
+    if(item.data && item.data.fields){
+      if(!item.id) item.id=uid2();
+      if(!item.updated) item.updated=Date.now();
+      if(!item.name) item.name=item.data.fields.ime||item.data.fields.ime2||"Без име";
+      if(!item.data.hist) item.data.hist=[{},{},{},{},{},{}];
+      if(!item.data.canvas) item.data.canvas={};
+      return item;
+    }
+    var name=(item.name||item.ime||item["Име"]||"").toString().trim(); if(!name) return null;
+    var tel=(item.tel||item.phone||item["Телефон"]||"").toString().trim();
+    var email=(item.email||item["Имейл"]||"").toString().trim();
+    return {id:uid2(),name:name,date:(item.date||""),updated:Date.now(),
+      data:{fields:{ime:name,ime2:name,tel:tel,email:email,data:"",vazrast:""},hist:[{},{},{},{},{},{}],canvas:{}}};
+  }
+  function parseCSV(text){
+    var first=text.split(/\r?\n/)[0]||"";
+    var delim=(first.split(";").length>first.split(",").length)?";":",";
+    var rows=[],i=0,field="",row=[],inq=false;
+    function pf(){ row.push(field); field=""; } function pr(){ pf(); rows.push(row); row=[]; }
+    while(i<text.length){ var c=text[i];
+      if(inq){ if(c==='"'){ if(text[i+1]==='"'){field+='"';i++;} else inq=false; } else field+=c; }
+      else { if(c==='"') inq=true; else if(c===delim) pf(); else if(c==="\n") pr(); else if(c==="\r"){} else field+=c; }
+      i++; }
+    if(field.length||row.length) pr();
+    if(!rows.length) return [];
+    var hdr=rows[0].map(function(h){return (h||"").trim().toLowerCase();});
+    function fc(ns){ for(var n=0;n<ns.length;n++){ var x=hdr.indexOf(ns[n]); if(x>=0)return x; } return -1; }
+    var ci=fc(["име","name","имена"]), cp=fc(["телефон","phone","gsm","тел","мобилен"]), ce=fc(["имейл","email","e-mail","мейл"]);
+    var out=[];
+    for(var r=1;r<rows.length;r++){ var rr=rows[r]; if(!rr||rr.every(function(x){return !x||!x.trim();})) continue;
+      out.push({name:ci>=0?rr[ci]:"",tel:cp>=0?rr[cp]:"",email:ce>=0?rr[ce]:""}); }
+    return out;
+  }
+  window.importList=function(ev){
+    var file=ev.target.files[0]; if(!file)return;
+    var rd=new FileReader();
+    rd.onload=function(){
+      var recs=[];
+      try{
+        var t=(rd.result||"").replace(/^\uFEFF/,"").trim();
+        if(t[0]==="{"||t[0]==="["){ var j=JSON.parse(t); var arr=Array.isArray(j)?j:(j.clients||[]); recs=arr.map(normalizeRec).filter(Boolean); }
+        else { recs=parseCSV(t).map(normalizeRec).filter(Boolean); }
+      }catch(e){ alert("Файлът не може да се разчете."); ev.target.value=""; return; }
+      if(!recs.length){ alert("Не намерих клиенти във файла."); ev.target.value=""; return; }
+      var list=loadClients(), idx={};
+      list.forEach(function(r){ idx[keyOf(r.name,(r.data&&r.data.fields&&r.data.fields.tel)||"")]=true; });
+      var added=0,skipped=0;
+      recs.forEach(function(r){ var k=keyOf(r.name,r.data.fields.tel||""); if(idx[k]){skipped++;return;} idx[k]=true; list.push(r); added++; });
+      var ok=saveClients(list);
+      renderList(); ev.target.value="";
+      alert((ok?"":"Внимание: мястото свърши. ")+"Импортирани: "+added+" нови клиенти"+(skipped?(", пропуснати "+skipped+" (вече ги има)"):"")+".");
+    };
+    rd.readAsText(file);
+  };
 
   // startup: restore logo + last draft
   (function init(){
